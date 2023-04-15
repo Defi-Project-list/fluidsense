@@ -2,31 +2,48 @@ const {
   contractLensABI,
   ERC721,
   contractLensAddress,
-} = require("./const/const");
+} = require("./../const/const");
 const ethers = require("ethers");
 const fetch = require("cross-fetch");
 const { Framework } = require("@superfluid-finance/sdk-core");
 
 require("dotenv").config();
 
+let ALCHEMY_KEY;
+let RPC_ENDPOINT;
+let API_ENDPOINT;
+let WSS_ENDPOINT;
+
+if (process.env.ENV === "prod") {
+  ALCHEMY_KEY = process.env.ALCHEMY_KEY_POLYGON;
+  RPC_ENDPOINT = process.env.RPC_ENDPOINT_POLYGON;
+  API_ENDPOINT = process.env.API_ENDPOINT;
+  WSS_ENDPOINT = process.env.WSS_RPC_ENDPOINT_POLYGON;
+} else {
+  ALCHEMY_KEY = process.env.ALCHEMY_KEY_MUMBAI;
+  RPC_ENDPOINT = process.env.RPC_ENDPOINT_MUMBAI;
+  API_ENDPOINT = process.env.API_ENDPOINT;
+  WSS_ENDPOINT = process.env.WSS_RPC_ENDPOINT_MUMBAI;
+}
+
 async function main() {
   const providerLens = new ethers.providers.WebSocketProvider(
-    `wss://polygon-mainnet.g.alchemy.com/v2/${process.env.ALCHEMY_KEY_POLYGON}`
+    `${process.env.WSS_RPC_ENDPOINT_POLYGON}${process.env.ALCHEMY_KEY_POLYGON}`
   );
   const providerSuperfluid = ethers.getDefaultProvider(
-    `https://polygon-mumbai.g.alchemy.com/v2/${process.env.ALCHEMY_KEY_MUMBAI}`
+    `${RPC_ENDPOINT}${ALCHEMY_KEY}`
   );
 
   const signer = new ethers.Wallet(process.env.PRIVATE_KEY, providerSuperfluid);
 
   const sf = await Framework.create({
-    chainId: Number(80001),
+    chainId: (await providerSuperfluid.getNetwork()).chainId,
     provider: providerSuperfluid,
   });
 
   let clientsArray = [];
 
-  const fUSDCx = await sf.loadSuperToken("fUSDCx");
+  const USDCx = await sf.loadSuperToken("USDCx");
 
   const options = {
     method: "GET",
@@ -36,16 +53,13 @@ async function main() {
   };
 
   async function getClients() {
-    const response = await fetch(
-      "https://qfgg4yahcg.execute-api.eu-north-1.amazonaws.com/fluidSense/clients",
-      options
-    );
+    const response = await fetch(`${API_ENDPOINT}/clients`, options);
     clientsArray = await response.json();
   }
 
   async function getFollowers(flowSenderAddress) {
     const response = await fetch(
-      `https://qfgg4yahcg.execute-api.eu-north-1.amazonaws.com/fluidSense/followers?flowSenderAddress=${flowSenderAddress}`,
+      `${API_ENDPOINT}/followers?flowSenderAddress=${flowSenderAddress}`,
       options
     );
     return response.json();
@@ -53,7 +67,7 @@ async function main() {
 
   async function deleteFollower(flowSenderAddress, followerAddress) {
     const response = await fetch(
-      `https://qfgg4yahcg.execute-api.eu-north-1.amazonaws.com/fluidSense/followers?flowSenderAddress=${flowSenderAddress}&followerAddress=${followerAddress}`,
+      `${API_ENDPOINT}/followers?flowSenderAddress=${flowSenderAddress}&followerAddress=${followerAddress}`,
       {
         method: "DELETE",
         headers: {
@@ -65,20 +79,17 @@ async function main() {
 
   async function postFollower(followerAddress, flowSenderAddress) {
     try {
-      await fetch(
-        "https://qfgg4yahcg.execute-api.eu-north-1.amazonaws.com/fluidSense/followers",
-        {
-          method: "POST",
-          headers: {
-            accept: "application/json",
-          },
-          body: JSON.stringify({
-            followerAddress: followerAddress,
-            flowSenderAddress: flowSenderAddress,
-          }),
-          mode: "no-cors",
-        }
-      );
+      await fetch(`${API_ENDPOINT}/followers`, {
+        method: "POST",
+        headers: {
+          accept: "application/json",
+        },
+        body: JSON.stringify({
+          followerAddress: followerAddress,
+          flowSenderAddress: flowSenderAddress,
+        }),
+        mode: "no-cors",
+      });
     } catch (err) {
       console.log(err);
     }
@@ -120,11 +131,17 @@ async function main() {
     );
     const calculatedFlowRate = Math.round(monthlyAmount / 2592000);
 
-    const createFlowOperation = fUSDCx.createFlowByOperator({
+    const feeData = await providerSuperfluid.getFeeData();
+
+    const createFlowOperation = USDCx.createFlowByOperator({
       sender: clientFromApi.flowSenderAddress,
       receiver: followerForSteam,
       flowRate: calculatedFlowRate,
+      overrides: {
+        gasPrice: feeData.gasPrice,
+      },
     });
+
     await createFlowOperation.exec(signer);
     await postFollower(followerForSteam, clientFromApi.flowSenderAddress);
     console.log("Create flow done!, adding", followerForSteam, "to followers");
@@ -148,11 +165,18 @@ async function main() {
         );
         if (Number(nftInBalance.toString()) === 0) {
           console.log("Cleaning...", follower.followerAddress);
+
+          const feeData = await providerSuperfluid.getFeeData();
+
           const deleteFlowOperation = sf.cfaV1.deleteFlowByOperator({
             sender: clientFromApi.flowSenderAddress,
             receiver: follower.followerAddress,
-            superToken: fUSDCx.address,
+            superToken: USDCx.address,
+            overrides: {
+              gasPrice: feeData.gasPrice,
+            },
           });
+
           await deleteFlowOperation.exec(signer);
           console.log("Cleaned", follower.followerAddress);
           await deleteFollower(
